@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>MolduraSaaS — Painel do Operador</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Config injetada pelo servidor (nunca commitar secrets aqui) -->
+  <!-- Config injetada pelo servidor via entrypoint.sh (nunca commitar secrets aqui) -->
   <script src="/config.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; }
@@ -92,10 +92,10 @@
 </div>
 
 <script>
-// Credenciais injetadas via /config.js (gerado pelo entrypoint.sh a partir de env vars)
+// Apenas anon key — nunca service_role no frontend
+// RLS policies no Supabase controlam o acesso (ver RLS_POLICIES.md no repo)
 const SB_URL = window.APP_CONFIG?.SB_URL || '';
 const SB_ANON = window.APP_CONFIG?.SB_ANON || '';
-const SERVICE_KEY = window.APP_CONFIG?.SERVICE_KEY || '';
 
 let currentTenantId = '', allOrders = [];
 
@@ -110,13 +110,21 @@ const STATUS_CONFIG = {
 const STATUSES = ['pendente','pago','em_producao','pronto','entregue','cancelado'];
 
 async function sb(endpoint, options={}) {
-  const isWrite = options.method && options.method!=='GET';
-  const key = isWrite ? SERVICE_KEY : SB_ANON;
   const res = await fetch(`${SB_URL}/rest/v1/${endpoint}`, {
     ...options,
-    headers: { 'apikey':key, 'Authorization':`Bearer ${key}`, 'Content-Type':'application/json', 'Prefer':'return=representation', ...(options.headers||{}) },
+    headers: {
+      'apikey': SB_ANON,
+      'Authorization': `Bearer ${SB_ANON}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation',
+      ...(options.headers||{})
+    },
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const err = await res.text();
+    console.error('Supabase error:', err);
+    throw new Error(err);
+  }
   const text = await res.text();
   return text ? JSON.parse(text) : [];
 }
@@ -124,7 +132,12 @@ async function sb(endpoint, options={}) {
 const fmtCurrency = v => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(v||0);
 const fmtDate = iso => iso ? new Date(iso).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
 const statusBadge = s => { const c=STATUS_CONFIG[s]||{label:s,color:'bg-slate-500/20 text-slate-400'}; return `<span class="badge ${c.color}">${c.label}</span>`; };
-function showToast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
+function showToast(msg,ok=true) {
+  const t=document.getElementById('toast');
+  t.style.background = ok ? '#22c55e' : '#ef4444';
+  t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2500);
+}
 
 async function init() { await loadTenants(); await refreshAll(); }
 
@@ -277,12 +290,23 @@ function openOrderModal(id) {
 function closeModal() { document.getElementById('order-modal').classList.remove('open'); }
 
 async function updateStatus(orderId, newStatus) {
-  await sb(`orders?id=eq.${orderId}`,{
-    method:'PATCH',
-    body:JSON.stringify({status:newStatus,updated_at:new Date().toISOString(),...(newStatus==='pago'?{pago_em:new Date().toISOString()}:{}),...(newStatus==='entregue'?{entregue_em:new Date().toISOString()}:{})}),
-  });
-  showToast('✓ Status atualizado!'); closeModal();
-  await loadOrders(); await loadMetrics();
+  try {
+    await sb(`orders?id=eq.${orderId}`, {
+      method:'PATCH',
+      body:JSON.stringify({
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+        ...(newStatus==='pago' ? {pago_em: new Date().toISOString()} : {}),
+        ...(newStatus==='entregue' ? {entregue_em: new Date().toISOString()} : {}),
+      }),
+    });
+    showToast('✓ Status atualizado!');
+    closeModal();
+    await loadOrders(); await loadMetrics();
+  } catch(e) {
+    showToast('✗ Erro ao atualizar (verificar RLS)', false);
+    console.error(e);
+  }
 }
 
 function switchTab(tab,btn) {
